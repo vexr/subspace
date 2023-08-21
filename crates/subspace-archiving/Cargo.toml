@@ -51,3 +51,7 @@ std = [
 [[bench]]
 name = "archiving"
 harness = false
+
+[[bench]]
+name = "reconstruction"
+harness = false

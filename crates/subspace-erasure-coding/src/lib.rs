@@ -10,9 +10,9 @@ use alloc::sync::Arc;
 use alloc::vec::Vec;
 use blst_rust::types::fft_settings::FsFFTSettings;
 use blst_rust::types::g1::FsG1;
-use blst_rust::types::poly::FsPoly;
+use blst_rust::types::poly::{FsPoly, FsPolyG1};
 use core::num::NonZeroUsize;
-use kzg::{FFTSettings, PolyRecover, DAS, FFTG1, G1};
+use kzg::{FFTSettings, PolyRecover, PolyRecoverG1, DAS, FFTG1, G1};
 use subspace_core_primitives::crypto::kzg::{Commitment, Polynomial};
 use subspace_core_primitives::crypto::Scalar;
 
@@ -110,5 +110,18 @@ impl ErasureCoding {
         self.fft_settings
             .fft_g1(&coeffs, false)
             .map(Commitment::vec_from_repr)
+    }
+
+    /// Recovery of missing shards from given shards (at least 1/2 should be `Some`).
+    ///
+    /// Both in input and output source shards are interleaved with parity shards:
+    /// source, parity, source, parity, ...
+    pub fn recover_commitments(&self, comm_shards: &[Option<Commitment>]) -> Result<Vec<Commitment>, String> {
+        let poly = FsPolyG1::recover_poly_from_samples_g1(
+            Commitment::slice_option_to_repr(comm_shards),
+            &self.fft_settings,
+        )?;
+
+        Ok(Commitment::vec_from_repr(poly.coeffs))
     }
 }

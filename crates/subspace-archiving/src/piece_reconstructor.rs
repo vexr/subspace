@@ -117,57 +117,29 @@ impl PiecesReconstructor {
 
             tmp_shards_scalars.clear();
         }
+        // Scratch buffer to avoid re-allocation
+        let mut tmp_shards_comms =
+            Vec::<Option<Commitment>>::with_capacity(ArchivedHistorySegment::NUM_PIECES);
 
-        let source_record_commitments = {
-            #[cfg(not(feature = "parallel"))]
-            let iter = reconstructed_pieces.iter_mut().zip(input_pieces).step_by(2);
-            #[cfg(feature = "parallel")]
-            let iter = reconstructed_pieces
-                .par_iter_mut()
-                .zip_eq(input_pieces)
-                .step_by(2);
-
-            iter.map(|(piece, maybe_input_piece)| {
-                if let Some(input_piece) = maybe_input_piece {
-                    Commitment::try_from_bytes(input_piece.commitment())
-                        .map_err(|_error| ReconstructorError::InvalidInputPieceCommitment)
-                } else {
-                    let scalars = {
-                        let mut scalars =
-                            Vec::with_capacity(piece.record().len().next_power_of_two());
-
-                        for record_chunk in piece.record().iter() {
-                            scalars.push(
-                                Scalar::try_from(record_chunk)
-                                    .map_err(ReconstructorError::DataShardsReconstruction)?,
-                            );
-                        }
-
-                        // Number of scalars for KZG must be a power of two elements
-                        scalars.resize(scalars.capacity(), Scalar::default());
-
-                        scalars
-                    };
-
-                    let polynomial = self.kzg.poly(&scalars).expect(
-                        "KZG instance must be configured to support this many scalars; qed",
-                    );
-                    let commitment = self.kzg.commit(&polynomial).expect(
-                        "KZG instance must be configured to support this many scalars; qed",
-                    );
-
-                    Ok(commitment)
-                }
-            })
-            .collect::<Result<Vec<_>, _>>()?
-        };
+        for maybe_piece in input_pieces.iter() {
+            if let Some(input_piece) = maybe_piece {
+                tmp_shards_comms.push(
+                    Some(Commitment::try_from_bytes(input_piece.commitment())
+                    .map_err(|_error| ReconstructorError::InvalidInputPieceCommitment)?)
+                );
+            }
+            else {
+                tmp_shards_comms.push(None);
+            }
+        }
+        
         let record_commitments = self
             .erasure_coding
-            .extend_commitments(&source_record_commitments)
+            .recover_commitments(&tmp_shards_comms)
             .expect(
                 "Erasure coding instance is deliberately configured to support this input; qed",
             );
-        drop(source_record_commitments);
+        tmp_shards_comms.clear();
 
         let record_commitment_hashes = reconstructed_pieces
             .iter_mut()
