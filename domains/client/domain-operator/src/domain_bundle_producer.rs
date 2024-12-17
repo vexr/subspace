@@ -431,17 +431,17 @@ where
             )
             .await?;
 
-        // if there are no extrinsics and no receipts to confirm, skip the bundle
-        // this is the default production behaviour
-        if self.is_bundle_empty(consensus_chain_best_hash, &extrinsics)? {
-            tracing::warn!(
-                ?domain_best_number,
-                "Skipping empty bundle production on slot {}",
-                slot_info.slot,
-            );
-
-            return Ok(None);
-        }
+        // // if there are no extrinsics and no receipts to confirm, skip the bundle
+        // // this is the default production behaviour
+        // if self.is_bundle_empty(consensus_chain_best_hash, &extrinsics)? {
+        //     tracing::warn!(
+        //         ?domain_best_number,
+        //         "Skipping empty bundle production on slot {}",
+        //         slot_info.slot,
+        //     );
+        //
+        //     return Ok(None);
+        // }
 
         info!("🔖 Producing bundle at slot {:?}", slot_info.slot);
 
