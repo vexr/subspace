@@ -5,17 +5,26 @@ use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::Duration;
 use subspace_core_primitives::segments::{SegmentHeader, SegmentIndex};
 use subspace_networking::libp2p::PeerId;
 use subspace_networking::protocols::request_response::handlers::segment_header::{
     SegmentHeaderRequest, SegmentHeaderResponse,
 };
 use subspace_networking::Node;
-use tracing::{debug, error, trace, warn};
+use tokio::time::sleep;
+use tracing::{debug, error, info, trace, warn};
 
 const SEGMENT_HEADER_NUMBER_PER_REQUEST: u64 = 1000;
 /// Initial number of peers to query for segment header
 const SEGMENT_HEADER_CONSENSUS_INITIAL_NODES: usize = 20;
+
+/// Number of retries for the last segment header peer checks, and the segment header batch
+/// request. Each new segment index range resets the retry count.
+const SEGMENT_HEADER_RETRIES: u32 = 5;
+
+/// Time between retries for segment headers.
+const SEGMENT_HEADER_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// Helps downloader segment headers from DSN
 pub struct SegmentHeaderDownloader<'a> {
@@ -79,11 +88,29 @@ impl<'a> SegmentHeaderDownloader<'a> {
                 ..segment_to_download_to.segment_index())
                 .rev()
                 .take(SEGMENT_HEADER_NUMBER_PER_REQUEST as usize)
-                .collect();
+                .collect::<Vec<SegmentIndex>>();
 
-            let (peer_id, segment_headers) = self
-                .get_segment_headers_batch(&peers, segment_indexes)
-                .await?;
+            let segment_indexes = Arc::new(segment_indexes);
+            let mut headers_batch_result = Err(());
+            for segment_headers_batch_retry in 0..SEGMENT_HEADER_RETRIES {
+                headers_batch_result = self
+                    .get_segment_headers_batch(&peers, segment_indexes.clone())
+                    .await;
+                if headers_batch_result.is_ok() {
+                    break;
+                }
+
+                info!(
+                    target: LOG_TARGET,
+                    %segment_headers_batch_retry,
+                    %SEGMENT_HEADER_RETRIES,
+                    ?SEGMENT_HEADER_RETRY_DELAY,
+                    "Waiting to retry segment header batch download...",
+                );
+                sleep(SEGMENT_HEADER_RETRY_DELAY).await;
+            }
+            let (peer_id, segment_headers) =
+                headers_batch_result.map_err(|()| "No more peers for segment headers.")?;
 
             for segment_header in segment_headers {
                 if segment_header.hash() != segment_to_download_to.prev_segment_header_hash() {
@@ -361,11 +388,9 @@ impl<'a> SegmentHeaderDownloader<'a> {
     async fn get_segment_headers_batch(
         &self,
         peers: &[PeerId],
-        segment_indexes: Vec<SegmentIndex>,
-    ) -> Result<(PeerId, Vec<SegmentHeader>), Box<dyn Error>> {
+        segment_indexes: Arc<Vec<SegmentIndex>>,
+    ) -> Result<(PeerId, Vec<SegmentHeader>), ()> {
         trace!(target: LOG_TARGET, ?segment_indexes, "Getting segment header batch..");
-
-        let segment_indexes = Arc::new(segment_indexes);
 
         for &peer_id in peers {
             trace!(target: LOG_TARGET, %peer_id, "get_closest_peers returned an item");
@@ -402,6 +427,6 @@ impl<'a> SegmentHeaderDownloader<'a> {
                 }
             };
         }
-        Err("No more peers for segment headers.".into())
+        Err(())
     }
 }
