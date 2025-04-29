@@ -37,8 +37,43 @@ impl<'a> SegmentHeaderDownloader<'a> {
     }
 
     /// Returns new segment headers known to DSN, ordered from 0 to the last known, but newer than
-    /// `last_known_segment_index`
+    /// `last_known_segment_index`. Retries new peers with exponential backoff.
     pub async fn get_segment_headers(
+        &self,
+        last_known_segment_header: &SegmentHeader,
+    ) -> Result<Vec<SegmentHeader>, Box<dyn Error>> {
+        let mut segment_headers = None;
+
+        for last_segment_header_retry in 0..SEGMENT_HEADER_RETRIES {
+            match self
+                .get_segment_headers_once(last_known_segment_header)
+                .await
+            {
+                Ok(headers) => {
+                    segment_headers = Some(headers);
+                    break;
+                }
+                Err(error) => {
+                    info!(
+                        target: LOG_TARGET,
+                        ?error,
+                        %last_segment_header_retry,
+                        %SEGMENT_HEADER_RETRIES,
+                        ?SEGMENT_HEADER_RETRY_DELAY,
+                        "Waiting to retry last segment header consensus check...",
+                    );
+                }
+            };
+
+            sleep(SEGMENT_HEADER_RETRY_DELAY).await;
+        }
+
+        segment_headers.ok_or_else(|| "Downloading segment headers failed.".into())
+    }
+
+    /// Returns new segment headers known to DSN, ordered from 0 to the last known, but newer than
+    /// `last_known_segment_index`. Only tries one set of random peers.
+    pub async fn get_segment_headers_once(
         &self,
         last_known_segment_header: &SegmentHeader,
     ) -> Result<Vec<SegmentHeader>, Box<dyn Error>> {
@@ -50,9 +85,11 @@ impl<'a> SegmentHeaderDownloader<'a> {
         );
 
         let Some((last_segment_header, peers)) = self.get_last_segment_header().await? else {
-            return Ok(Vec::new());
+            // No peers found, so we want to retry
+            return Err("No initial peers for segment headers.".into());
         };
 
+        // No new segment headers found, so retries are probably pointless.
         if last_segment_header.segment_index() <= last_known_segment_index {
             debug!(
                 target: LOG_TARGET,
