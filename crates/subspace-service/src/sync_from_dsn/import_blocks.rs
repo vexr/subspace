@@ -167,9 +167,9 @@ where
                     .block(
                         client
                             .hash(block_number)?
-                            .expect("Block before best block number must always be found; qed"),
+                            .expect("Genesis block hash must always be found; qed"),
                     )?
-                    .expect("Block before best block number must always be found; qed");
+                    .expect("Genesis block data must always be found; qed");
 
                 if encode_block(signed_block) != block_bytes {
                     return Err(Error::Other(
@@ -184,6 +184,7 @@ where
             // insignificant. Feel free to address this in case you have a good strategy, but it
             // seems like complexity is not worth it.
             while block_number.saturating_sub(best_block_number) >= QUEUED_BLOCKS_LIMIT.into() {
+                let just_queued_blocks_count = blocks_to_import.len();
                 if !blocks_to_import.is_empty() {
                     // Import queue handles verification and importing it into the client
                     import_queue_service.import_blocks(
@@ -195,6 +196,8 @@ where
                     target: LOG_TARGET,
                     %block_number,
                     %best_block_number,
+                    %just_queued_blocks_count,
+                    %QUEUED_BLOCKS_LIMIT,
                     "Number of importing blocks reached queue limit, waiting before retrying"
                 );
                 tokio::time::sleep(WAIT_FOR_BLOCKS_TO_IMPORT).await;
