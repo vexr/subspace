@@ -389,7 +389,14 @@ impl<'a> SegmentHeaderDownloader<'a> {
         peers: &[PeerId],
         segment_indexes: Arc<Vec<SegmentIndex>>,
     ) -> Result<(PeerId, Vec<SegmentHeader>), ()> {
-        trace!(target: LOG_TARGET, ?segment_indexes, "Getting segment header batch..");
+        trace!(
+            target: LOG_TARGET,
+            peer_count = %peers.len(),
+            segment_indexes_count = %segment_indexes.len(),
+            first_segment_index = ?segment_indexes.first(),
+            last_segment_index = ?segment_indexes.last(),
+            "Getting segment header batch...",
+        );
 
         for &peer_id in peers {
             trace!(target: LOG_TARGET, %peer_id, "get_closest_peers returned an item");
