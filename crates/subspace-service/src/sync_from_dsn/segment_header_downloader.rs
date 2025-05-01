@@ -5,17 +5,26 @@ use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::Duration;
 use subspace_core_primitives::segments::{SegmentHeader, SegmentIndex};
 use subspace_networking::libp2p::PeerId;
 use subspace_networking::protocols::request_response::handlers::segment_header::{
     SegmentHeaderRequest, SegmentHeaderResponse,
 };
 use subspace_networking::Node;
-use tracing::{debug, error, trace, warn};
+use tokio::time::sleep;
+use tracing::{debug, error, info, trace, warn};
 
 const SEGMENT_HEADER_NUMBER_PER_REQUEST: u64 = 1000;
 /// Initial number of peers to query for segment header
 const SEGMENT_HEADER_CONSENSUS_INITIAL_NODES: usize = 20;
+
+/// Number of retries for the last segment header peer checks, and the segment header batch
+/// request. Each new segment index range resets the retry count.
+const SEGMENT_HEADER_RETRIES: u32 = 5;
+
+/// Time between retries for segment headers.
+const SEGMENT_HEADER_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// Helps downloader segment headers from DSN
 pub struct SegmentHeaderDownloader<'a> {
@@ -28,49 +37,133 @@ impl<'a> SegmentHeaderDownloader<'a> {
     }
 
     /// Returns new segment headers known to DSN, ordered from 0 to the last known, but newer than
-    /// `last_known_segment_index`
+    /// `last_known_segment_index`. Retries new peers with exponential backoff.
     pub async fn get_segment_headers(
         &self,
         last_known_segment_header: &SegmentHeader,
     ) -> Result<Vec<SegmentHeader>, Box<dyn Error>> {
+        let mut segment_headers = Vec::new();
+
+        for last_segment_header_retry in 0..SEGMENT_HEADER_RETRIES {
+            match self
+                .get_segment_headers_once(
+                    last_known_segment_header,
+                    std::mem::take(&mut segment_headers),
+                )
+                .await
+            {
+                Ok((expected_count, headers)) => {
+                    segment_headers = headers;
+                    if segment_headers.len() >= expected_count as usize {
+                        break;
+                    } else if last_segment_header_retry + 1 < SEGMENT_HEADER_RETRIES {
+                        let next_target_segment = segment_headers
+                            .first()
+                            .expect("Returns an error if empty; qed")
+                            .segment_index();
+                        info!(
+                            target: LOG_TARGET,
+                            %expected_count,
+                            actual_count = %segment_headers.len(),
+                            local_last_known_segment = ?last_known_segment_header.segment_index(),
+                            ?next_target_segment,
+                            %last_segment_header_retry,
+                            %SEGMENT_HEADER_RETRIES,
+                            ?SEGMENT_HEADER_RETRY_DELAY,
+                            "Segment headers download finished earlier than expected, retrying with new peers...",
+                        );
+                    } else {
+                        // We've run out of retries, so we need to return an error, because headers
+                        // are missing between our last known and the peer set's last known.
+                        return Err("Downloading segment headers failed.".into());
+                    }
+                }
+                Err(error) => {
+                    info!(
+                        target: LOG_TARGET,
+                        ?error,
+                        %last_segment_header_retry,
+                        %SEGMENT_HEADER_RETRIES,
+                        ?SEGMENT_HEADER_RETRY_DELAY,
+                        "Waiting to retry last segment header consensus check...",
+                    );
+                }
+            };
+
+            sleep(SEGMENT_HEADER_RETRY_DELAY).await;
+        }
+
+        Ok(segment_headers)
+    }
+
+    /// Returns new segment headers known to DSN, ordered from 0 to the last known, but newer than
+    /// `last_known_segment_index`. Also returns the expected number of new segment headers.
+    ///
+    /// Only tries one set of random peers, but retries each batch of segment headers with
+    /// exponential backoff.
+    async fn get_segment_headers_once(
+        &self,
+        last_known_segment_header: &SegmentHeader,
+        partial_segment_headers: Vec<SegmentHeader>,
+    ) -> Result<(u64, Vec<SegmentHeader>), Box<dyn Error>> {
         let last_known_segment_index = last_known_segment_header.segment_index();
         trace!(
             target: LOG_TARGET,
             %last_known_segment_index,
-            "Searching for latest segment header"
+            partial_segment_headers = %partial_segment_headers.len(),
+            "Searching for latest segment header",
         );
 
-        let Some((last_segment_header, peers)) = self.get_last_segment_header().await? else {
-            return Ok(Vec::new());
+        let Some((mut last_segment_header, peers)) = self.get_last_segment_header().await? else {
+            // No peers found, so we want to retry
+            return Err("No initial peers for segment headers.".into());
         };
 
+        // It is possible, but unlikely, that a new segment has been produced since the last retry.
+        // To avoid downloading segment headers before and after the partial_segment_headers, we
+        // reset it to where the previous segment header download left off.
+        if let Some(first_partial_segment_header) = partial_segment_headers.first() {
+            last_segment_header = *first_partial_segment_header;
+        }
+
+        // No new segment headers found, so retries are probably pointless.
         if last_segment_header.segment_index() <= last_known_segment_index {
             debug!(
                 target: LOG_TARGET,
                 %last_known_segment_index,
                 last_found_segment_index = %last_segment_header.segment_index(),
-                "No new segment headers found, nothing to download"
+                partial_segment_headers = %partial_segment_headers.len(),
+                "No new segment headers found, nothing to download",
             );
 
-            return Ok(Vec::new());
+            return Ok((
+                partial_segment_headers.len() as u64,
+                partial_segment_headers,
+            ));
         }
 
         debug!(
             target: LOG_TARGET,
             %last_known_segment_index,
             last_segment_index = %last_segment_header.segment_index(),
-            "Downloading segment headers"
+            partial_segment_headers = %partial_segment_headers.len(),
+            "Downloading segment headers",
         );
 
-        let Some(new_segment_headers_count) = last_segment_header
+        let new_segment_headers_count = last_segment_header
             .segment_index()
             .checked_sub(last_known_segment_index)
-        else {
-            return Ok(Vec::new());
+            .expect("just checked last_segment_header is greater; qed");
+
+        let mut new_segment_headers = if partial_segment_headers.is_empty() {
+            let mut new_segment_headers =
+                Vec::with_capacity(u64::from(new_segment_headers_count) as usize);
+            new_segment_headers.push(last_segment_header);
+            new_segment_headers
+        } else {
+            // We already have some segment headers, so we need to add them to the new ones
+            partial_segment_headers
         };
-        let mut new_segment_headers =
-            Vec::with_capacity(u64::from(new_segment_headers_count) as usize);
-        new_segment_headers.push(last_segment_header);
 
         let mut segment_to_download_to = last_segment_header;
         while segment_to_download_to.segment_index() - last_known_segment_index > SegmentIndex::ONE
@@ -79,11 +172,38 @@ impl<'a> SegmentHeaderDownloader<'a> {
                 ..segment_to_download_to.segment_index())
                 .rev()
                 .take(SEGMENT_HEADER_NUMBER_PER_REQUEST as usize)
-                .collect();
+                .collect::<Vec<SegmentIndex>>();
 
-            let (peer_id, segment_headers) = self
-                .get_segment_headers_batch(&peers, segment_indexes)
-                .await?;
+            let segment_indexes = Arc::new(segment_indexes);
+            let mut headers_batch_result = Err(());
+            for segment_headers_batch_retry in 0..SEGMENT_HEADER_RETRIES {
+                headers_batch_result = self
+                    .get_segment_headers_batch(&peers, segment_indexes.clone())
+                    .await;
+                if headers_batch_result.is_ok() {
+                    break;
+                }
+
+                info!(
+                    target: LOG_TARGET,
+                    %segment_headers_batch_retry,
+                    %SEGMENT_HEADER_RETRIES,
+                    ?SEGMENT_HEADER_RETRY_DELAY,
+                    "Waiting to retry segment header batch download...",
+                );
+                sleep(SEGMENT_HEADER_RETRY_DELAY).await;
+            }
+
+            let Ok((peer_id, segment_headers)) = headers_batch_result else {
+                warn!(
+                    target: LOG_TARGET,
+                    ?new_segment_headers_count,
+                    actual_count = %new_segment_headers.len(),
+                    "No more peers for segment headers, finding new peers.",
+                );
+                // Check the partial headers, return them, and try another set of peers.
+                break;
+            };
 
             for segment_header in segment_headers {
                 if segment_header.hash() != segment_to_download_to.prev_segment_header_hash() {
@@ -93,7 +213,7 @@ impl<'a> SegmentHeaderDownloader<'a> {
                         segment_index=%segment_to_download_to.segment_index() - SegmentIndex::ONE,
                         actual_hash=?segment_header.hash(),
                         expected_hash=?segment_to_download_to.prev_segment_header_hash(),
-                        "Segment header hash doesn't match expected hash from the last block"
+                        "Segment header hash doesn't match expected hash from the last block",
                     );
 
                     return Err(
@@ -122,7 +242,7 @@ impl<'a> SegmentHeaderDownloader<'a> {
             );
         }
 
-        Ok(new_segment_headers)
+        Ok((u64::from(new_segment_headers_count), new_segment_headers))
     }
 
     /// Return last segment header known to DSN and agreed on by majority of the peer set with
@@ -361,11 +481,16 @@ impl<'a> SegmentHeaderDownloader<'a> {
     async fn get_segment_headers_batch(
         &self,
         peers: &[PeerId],
-        segment_indexes: Vec<SegmentIndex>,
-    ) -> Result<(PeerId, Vec<SegmentHeader>), Box<dyn Error>> {
-        trace!(target: LOG_TARGET, ?segment_indexes, "Getting segment header batch..");
-
-        let segment_indexes = Arc::new(segment_indexes);
+        segment_indexes: Arc<Vec<SegmentIndex>>,
+    ) -> Result<(PeerId, Vec<SegmentHeader>), ()> {
+        trace!(
+            target: LOG_TARGET,
+            peer_count = %peers.len(),
+            segment_indexes_count = %segment_indexes.len(),
+            first_segment_index = ?segment_indexes.first(),
+            last_segment_index = ?segment_indexes.last(),
+            "Getting segment header batch...",
+        );
 
         for &peer_id in peers {
             trace!(target: LOG_TARGET, %peer_id, "get_closest_peers returned an item");
@@ -417,6 +542,6 @@ impl<'a> SegmentHeaderDownloader<'a> {
                 }
             };
         }
-        Err("No more peers for segment headers.".into())
+        Err(())
     }
 }
