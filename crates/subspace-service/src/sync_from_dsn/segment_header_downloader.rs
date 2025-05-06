@@ -165,33 +165,9 @@ impl<'a> SegmentHeaderDownloader<'a> {
         {
             trace!(target: LOG_TARGET, %retry_attempt, "Downloading last segment headers");
 
-            // Get random peers. Some of them could be bootstrap nodes with no support for
-            // request-response protocol for segment commitment.
-            let get_peers_result = self
-                .dsn_node
-                .get_closest_peers(PeerId::random().into())
-                .await;
-
             // Acquire segment headers from peers.
-            let peers = match get_peers_result {
-                Ok(get_peers_stream) => {
-                    get_peers_stream
-                        .filter(|peer_id| {
-                            let known_peer = peer_segment_headers.contains_key(peer_id);
-
-                            async move { !known_peer }
-                        })
-                        .collect::<Vec<_>>()
-                        .await
-                }
-                Err(err) => {
-                    warn!(target: LOG_TARGET, ?err, "get_closest_peers returned an error");
-
-                    return Err(err.into());
-                }
-            };
-
-            trace!(target: LOG_TARGET, peers_count = %peers.len(), "Found closest peers");
+            let mut peers = self.get_random_peers().await?;
+            peers.retain(|peer_id| !peer_segment_headers.contains_key(peer_id));
 
             let new_last_known_segment_headers = peers
                 .into_iter()
@@ -434,5 +410,27 @@ impl<'a> SegmentHeaderDownloader<'a> {
             };
         }
         Err(())
+    }
+
+    // Get random peers. Some of them could be bootstrap nodes with no support for
+    // request-response protocol for segment headers.
+    async fn get_random_peers(&self) -> Result<Vec<PeerId>, Box<dyn Error>> {
+        let get_peers_result = self
+            .dsn_node
+            .get_closest_peers(PeerId::random().into())
+            .await;
+
+        let peers = match get_peers_result {
+            Ok(get_peers_stream) => get_peers_stream.collect::<Vec<_>>().await,
+            Err(err) => {
+                warn!(target: LOG_TARGET, ?err, "get_closest_peers returned an error");
+
+                return Err(err.into());
+            }
+        };
+
+        trace!(target: LOG_TARGET, peers_count = %peers.len(), "Found closest peers");
+
+        Ok(peers)
     }
 }
