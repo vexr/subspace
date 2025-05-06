@@ -49,7 +49,7 @@ impl<'a> SegmentHeaderDownloader<'a> {
             "Searching for latest segment header"
         );
 
-        let Some((last_segment_header, peers)) = self.get_last_segment_header().await? else {
+        let Some((last_segment_header, mut peers)) = self.get_last_segment_header().await? else {
             return Ok(Vec::new());
         };
 
@@ -92,6 +92,13 @@ impl<'a> SegmentHeaderDownloader<'a> {
             let segment_indexes = Arc::new(segment_indexes);
             let mut headers_batch_result = Err(());
             for segment_headers_batch_retry in 0..SEGMENT_HEADER_RETRIES {
+                if segment_headers_batch_retry > 0 {
+                    // Get new random peers, because the previous random peers didn't provide any
+                    // segment headers. Some of them could be bootstrap nodes with no support for
+                    // request-response protocol for segment headers.
+                    peers = self.get_random_peers().await?;
+                }
+
                 headers_batch_result = self
                     .get_segment_headers_batch(&peers, segment_indexes.clone())
                     .await;
