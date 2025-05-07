@@ -5,17 +5,26 @@ use std::collections::{BTreeSet, HashMap};
 use std::error::Error;
 use std::pin::pin;
 use std::sync::Arc;
+use std::time::Duration;
 use subspace_core_primitives::segments::{SegmentHeader, SegmentIndex};
 use subspace_networking::libp2p::PeerId;
 use subspace_networking::protocols::request_response::handlers::segment_header::{
     SegmentHeaderRequest, SegmentHeaderResponse,
 };
 use subspace_networking::Node;
-use tracing::{debug, error, trace, warn};
+use tokio::time::sleep;
+use tracing::{debug, error, info, trace, warn};
 
 const SEGMENT_HEADER_NUMBER_PER_REQUEST: u64 = 1000;
 /// Initial number of peers to query for segment header
 const SEGMENT_HEADER_CONSENSUS_INITIAL_NODES: usize = 20;
+
+/// Number of retries for the last segment header peer checks, and the segment header batch
+/// request. Each new segment index range resets the retry count.
+const SEGMENT_HEADER_RETRIES: u32 = 5;
+
+/// Time between retries for segment headers.
+const SEGMENT_HEADER_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 /// Helps downloader segment headers from DSN
 pub struct SegmentHeaderDownloader<'a> {
@@ -40,7 +49,7 @@ impl<'a> SegmentHeaderDownloader<'a> {
             "Searching for latest segment header"
         );
 
-        let Some((last_segment_header, peers)) = self.get_last_segment_header().await? else {
+        let Some((last_segment_header, mut peers)) = self.get_last_segment_header().await? else {
             return Ok(Vec::new());
         };
 
@@ -62,12 +71,11 @@ impl<'a> SegmentHeaderDownloader<'a> {
             "Downloading segment headers"
         );
 
-        let Some(new_segment_headers_count) = last_segment_header
+        let new_segment_headers_count = last_segment_header
             .segment_index()
             .checked_sub(last_known_segment_index)
-        else {
-            return Ok(Vec::new());
-        };
+            .expect("just checked last_segment_header is greater; qed");
+
         let mut new_segment_headers =
             Vec::with_capacity(u64::from(new_segment_headers_count) as usize);
         new_segment_headers.push(last_segment_header);
@@ -79,11 +87,36 @@ impl<'a> SegmentHeaderDownloader<'a> {
                 ..segment_to_download_to.segment_index())
                 .rev()
                 .take(SEGMENT_HEADER_NUMBER_PER_REQUEST as usize)
-                .collect();
+                .collect::<Vec<SegmentIndex>>();
 
-            let (peer_id, segment_headers) = self
-                .get_segment_headers_batch(&peers, segment_indexes)
-                .await?;
+            let segment_indexes = Arc::new(segment_indexes);
+            let mut headers_batch_result = Err(());
+            for segment_headers_batch_retry in 0..SEGMENT_HEADER_RETRIES {
+                if segment_headers_batch_retry > 0 {
+                    // Get new random peers, because the previous random peers didn't provide any
+                    // segment headers. Some of them could be bootstrap nodes with no support for
+                    // request-response protocol for segment headers.
+                    peers = self.get_random_peers().await?;
+                }
+
+                headers_batch_result = self
+                    .get_segment_headers_batch(&peers, segment_indexes.clone())
+                    .await;
+                if headers_batch_result.is_ok() {
+                    break;
+                }
+
+                info!(
+                    target: LOG_TARGET,
+                    %segment_headers_batch_retry,
+                    %SEGMENT_HEADER_RETRIES,
+                    ?SEGMENT_HEADER_RETRY_DELAY,
+                    "Waiting to retry segment header batch download...",
+                );
+                sleep(SEGMENT_HEADER_RETRY_DELAY).await;
+            }
+            let (peer_id, segment_headers) =
+                headers_batch_result.map_err(|()| "No more peers for segment headers.")?;
 
             for segment_header in segment_headers {
                 if segment_header.hash() != segment_to_download_to.prev_segment_header_hash() {
@@ -139,33 +172,9 @@ impl<'a> SegmentHeaderDownloader<'a> {
         {
             trace!(target: LOG_TARGET, %retry_attempt, "Downloading last segment headers");
 
-            // Get random peers. Some of them could be bootstrap nodes with no support for
-            // request-response protocol for segment commitment.
-            let get_peers_result = self
-                .dsn_node
-                .get_closest_peers(PeerId::random().into())
-                .await;
-
             // Acquire segment headers from peers.
-            let peers = match get_peers_result {
-                Ok(get_peers_stream) => {
-                    get_peers_stream
-                        .filter(|peer_id| {
-                            let known_peer = peer_segment_headers.contains_key(peer_id);
-
-                            async move { !known_peer }
-                        })
-                        .collect::<Vec<_>>()
-                        .await
-                }
-                Err(err) => {
-                    warn!(target: LOG_TARGET, ?err, "get_closest_peers returned an error");
-
-                    return Err(err.into());
-                }
-            };
-
-            trace!(target: LOG_TARGET, peers_count = %peers.len(), "Found closest peers");
+            let mut peers = self.get_random_peers().await?;
+            peers.retain(|peer_id| !peer_segment_headers.contains_key(peer_id));
 
             let new_last_known_segment_headers = peers
                 .into_iter()
@@ -361,11 +370,16 @@ impl<'a> SegmentHeaderDownloader<'a> {
     async fn get_segment_headers_batch(
         &self,
         peers: &[PeerId],
-        segment_indexes: Vec<SegmentIndex>,
-    ) -> Result<(PeerId, Vec<SegmentHeader>), Box<dyn Error>> {
-        trace!(target: LOG_TARGET, ?segment_indexes, "Getting segment header batch..");
-
-        let segment_indexes = Arc::new(segment_indexes);
+        segment_indexes: Arc<Vec<SegmentIndex>>,
+    ) -> Result<(PeerId, Vec<SegmentHeader>), ()> {
+        trace!(
+            target: LOG_TARGET,
+            peer_count = %peers.len(),
+            segment_indexes_count = %segment_indexes.len(),
+            first_segment_index = ?segment_indexes.first(),
+            last_segment_index = ?segment_indexes.last(),
+            "Getting segment header batch...",
+        );
 
         for &peer_id in peers {
             trace!(target: LOG_TARGET, %peer_id, "get_closest_peers returned an item");
@@ -417,6 +431,28 @@ impl<'a> SegmentHeaderDownloader<'a> {
                 }
             };
         }
-        Err("No more peers for segment headers.".into())
+        Err(())
+    }
+
+    // Get random peers. Some of them could be bootstrap nodes with no support for
+    // request-response protocol for segment headers.
+    async fn get_random_peers(&self) -> Result<Vec<PeerId>, Box<dyn Error>> {
+        let get_peers_result = self
+            .dsn_node
+            .get_closest_peers(PeerId::random().into())
+            .await;
+
+        let peers = match get_peers_result {
+            Ok(get_peers_stream) => get_peers_stream.collect::<Vec<_>>().await,
+            Err(err) => {
+                warn!(target: LOG_TARGET, ?err, "get_closest_peers returned an error");
+
+                return Err(err.into());
+            }
+        };
+
+        trace!(target: LOG_TARGET, peers_count = %peers.len(), "Found closest peers");
+
+        Ok(peers)
     }
 }
