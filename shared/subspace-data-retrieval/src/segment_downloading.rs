@@ -2,6 +2,7 @@
 
 use crate::piece_getter::PieceGetter;
 use futures::StreamExt;
+use std::time::Duration;
 use subspace_archiving::archiver::Segment;
 use subspace_archiving::reconstructor::{Reconstructor, ReconstructorError};
 use subspace_core_primitives::pieces::Piece;
@@ -10,16 +11,36 @@ use subspace_core_primitives::segments::{
 };
 use subspace_erasure_coding::ErasureCoding;
 use tokio::task::spawn_blocking;
+use tokio::time::sleep;
 use tracing::debug;
+
+/// The amount of time we wait after a piece download failure, before we try the next piece.
+/// This avoids overwhelming the network with requests.
+const PIECE_DOWNLOAD_DELAY: Duration = Duration::from_secs(1);
 
 /// Segment getter errors.
 #[derive(Debug, thiserror::Error)]
 pub enum SegmentDownloadingError {
     /// Not enough pieces
-    #[error("Not enough ({downloaded_pieces}) pieces")]
+    #[error(
+        "Not enough ({downloaded_pieces}/{}) pieces for segment {segment_index},\
+        first success position: {first_success:?}, last success: {last_success:?},\
+        first failure: {first_failure:?}, last failure: {last_failure:?}",
+        RecordedHistorySegment::NUM_RAW_RECORDS
+    )]
     NotEnoughPieces {
+        /// The segment we were trying to download
+        segment_index: SegmentIndex,
         /// Number of pieces that were downloaded
         downloaded_pieces: usize,
+        /// Position of first piece in segment that was successfully downloaded
+        first_success: Option<u32>,
+        /// Position of last piece in segment that was successfully downloaded
+        last_success: Option<u32>,
+        /// Position of first piece in segment that failed to download
+        first_failure: Option<u32>,
+        /// Position of last piece in segment that failed to download
+        last_failure: Option<u32>,
     },
 
     /// Piece getter error
@@ -66,7 +87,7 @@ where
 
 /// Downloads pieces of the segment such that segment can be reconstructed afterward.
 ///
-/// Prefers source pieces if available, on error returns number of downloaded pieces
+/// Prefers source pieces if available, on error returns number of downloaded pieces.
 pub async fn download_segment_pieces<PG>(
     segment_index: SegmentIndex,
     piece_getter: &PG,
@@ -77,11 +98,18 @@ where
     let required_pieces_number = RecordedHistorySegment::NUM_RAW_RECORDS;
     let mut downloaded_pieces = 0_usize;
 
+    // Debugging failure patterns in piece downloads
+    let mut first_success = None;
+    let mut last_success = None;
+    let mut first_failure = None;
+    let mut last_failure = None;
+
     let mut segment_pieces = vec![None::<Piece>; ArchivedHistorySegment::NUM_PIECES];
 
     let mut pieces_iter = segment_index
         .segment_piece_indexes_source_first()
-        .into_iter();
+        .into_iter()
+        .peekable();
 
     // Download in batches until we get enough or exhaust available pieces
     while !pieces_iter.is_empty() && downloaded_pieces != required_pieces_number {
@@ -91,6 +119,7 @@ where
             .collect();
 
         let mut received_segment_pieces = piece_getter.get_pieces(piece_indices).await?;
+        let mut did_fail = false;
 
         while let Some((piece_index, result)) = received_segment_pieces.next().await {
             match result {
@@ -100,14 +129,45 @@ where
                         .get_mut(piece_index.position() as usize)
                         .expect("Piece position is by definition within segment; qed")
                         .replace(piece);
+
+                    if first_success.is_none() {
+                        first_success = Some(piece_index.position());
+                    }
+                    last_success = Some(piece_index.position());
                 }
+                // We often see an error where 127 pieces are downloaded successfully, but the
+                // other 129 fail. It seems like 1 request in a 128 piece batch fails, then 128
+                // single piece requests are made, and also fail.
+                // Delaying requests after a failure gives the node a chance to find other peers.
                 Ok(None) => {
                     debug!(%piece_index, "Piece was not found");
+                    did_fail = true;
+                    if first_failure.is_none() {
+                        first_failure = Some(piece_index.position());
+                    }
+                    last_failure = Some(piece_index.position());
                 }
                 Err(error) => {
                     debug!(%error, %piece_index, "Failed to get piece");
+                    did_fail = true;
+                    if first_failure.is_none() {
+                        first_failure = Some(piece_index.position());
+                    }
+                    last_failure = Some(piece_index.position());
                 }
             }
+        }
+
+        if did_fail {
+            // If we had a failure, wait before trying the next batch
+            debug!(
+                next_piece = ?pieces_iter.peek(),
+                ?downloaded_pieces,
+                ?required_pieces_number,
+                ?PIECE_DOWNLOAD_DELAY,
+                "Waiting to try next piece(s)..."
+            );
+            sleep(PIECE_DOWNLOAD_DELAY).await;
         }
     }
 
@@ -119,7 +179,14 @@ where
             "Failed to retrieve pieces for segment"
         );
 
-        return Err(SegmentDownloadingError::NotEnoughPieces { downloaded_pieces });
+        return Err(SegmentDownloadingError::NotEnoughPieces {
+            segment_index,
+            downloaded_pieces,
+            first_success,
+            last_success,
+            first_failure,
+            last_failure,
+        });
     }
 
     Ok(segment_pieces)
