@@ -22,8 +22,13 @@ const PIECE_DOWNLOAD_DELAY: Duration = Duration::from_secs(1);
 #[derive(Debug, thiserror::Error)]
 pub enum SegmentDownloadingError {
     /// Not enough pieces
-    #[error("Not enough ({downloaded_pieces}) pieces")]
+    #[error(
+        "Not enough ({downloaded_pieces}/{}) pieces for segment {segment_index}",
+        RecordedHistorySegment::NUM_RAW_RECORDS
+    )]
     NotEnoughPieces {
+        /// The segment we were trying to download
+        segment_index: SegmentIndex,
         /// Number of pieces that were downloaded
         downloaded_pieces: usize,
     },
@@ -145,7 +150,10 @@ where
             "Failed to retrieve pieces for segment"
         );
 
-        return Err(SegmentDownloadingError::NotEnoughPieces { downloaded_pieces });
+        return Err(SegmentDownloadingError::NotEnoughPieces {
+            segment_index,
+            downloaded_pieces,
+        });
     }
 
     Ok(segment_pieces)
