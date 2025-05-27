@@ -29,8 +29,8 @@ use sp_domains::merkle_tree::MerkleTree;
 use sp_domains::storage::RawGenesis;
 use sp_domains::{
     BundleHeader, ChainId, DomainId, ExecutionReceipt, InboxedBundle, OpaqueBundle,
-    OperatorAllowList, OperatorId, OperatorPair, ProofOfElection, RuntimeId, RuntimeType,
-    SealedBundleHeader,
+    OperatorAllowList, OperatorId, OperatorPair, ProofOfElection, RuntimeId, RuntimeObject,
+    RuntimeType, SealedBundleHeader,
 };
 use sp_domains_fraud_proof::fraud_proof::FraudProof;
 use sp_runtime::generic::{Preamble, EXTRINSIC_FORMAT_VERSION};
@@ -41,7 +41,7 @@ use sp_runtime::traits::{
 use sp_runtime::transaction_validity::TransactionValidityError;
 use sp_runtime::type_with_default::TypeWithDefault;
 use sp_runtime::{BuildStorage, OpaqueExtrinsic};
-use sp_version::RuntimeVersion;
+use sp_version::{ApisVec, RuntimeVersion};
 use std::num::NonZeroU64;
 use subspace_core_primitives::pieces::Piece;
 use subspace_core_primitives::segments::HistorySize;
@@ -1105,4 +1105,156 @@ fn test_type_with_default_nonce_encode() {
     let encode_1 = nonce_1.encode();
     let encode_2 = nonce_2.encode();
     assert_eq!(encode_1, encode_2);
+}
+
+/// This test makes sure the RuntimeObject type is encoded and decoded accurately.
+/// (See #3547 for one time when it was not.)
+#[test]
+fn test_runtime_object_encoding() {
+    let runtime_object = RuntimeObject::<BlockNumber, Hash> {
+        runtime_name: String::new(),
+        runtime_type: RuntimeType::Evm,
+        runtime_upgrades: 0,
+        instance_count: 0,
+        hash: Hash::zero(),
+        raw_genesis: RawGenesis::default(),
+        version: RuntimeVersion {
+            spec_name: String::new().into(),
+            impl_name: String::new().into(),
+            authoring_version: 0,
+            spec_version: 0,
+            impl_version: 0,
+            apis: (&[]).into(),
+            transaction_version: 0,
+            system_version: 1,
+        },
+        created_at: 0,
+        updated_at: 0,
+    };
+
+    let runtime_object_encoded = runtime_object.encode();
+    let mut runtime_object_encoded_slice = runtime_object_encoded.as_slice();
+    // TODO: use decode_all here once the bug is fixed
+    let runtime_object_roundtrip_result =
+        RuntimeObject::<BlockNumber, Hash>::decode(&mut runtime_object_encoded_slice);
+    let runtime_object_roundtrip_encoded =
+        runtime_object_roundtrip_result.as_ref().map(Encode::encode);
+
+    // Checking everything at once allows us to look at the object, encoded bytes, and leftover bytes at the same time
+    match (
+        &runtime_object_roundtrip_result,
+        runtime_object_roundtrip_encoded,
+    ) {
+        (Ok(runtime_object_roundtrip), Ok(runtime_object_roundtrip_encoded)) => assert_eq!(
+            (
+                &runtime_object,
+                hex::encode(&runtime_object_encoded),
+                hex::encode([]),
+            ),
+            (
+                runtime_object_roundtrip,
+                hex::encode(&runtime_object_roundtrip_encoded),
+                // There should be no left over bytes after decoding
+                hex::encode(&runtime_object_encoded_slice),
+            )
+        ),
+        // This always fails, we use it to show the left over bytes
+        (Err(runtime_object_roundtrip_error), _) => assert_eq!(
+            (Ok(runtime_object), hex::encode([])),
+            (
+                Err(runtime_object_roundtrip_error),
+                hex::encode(&runtime_object_encoded_slice)
+            ),
+        ),
+        (Ok(_), Err(_)) => unreachable!("only decoding can introduce errors"),
+    }
+}
+
+/// This test makes sure the RuntimeVersion type is encoded and decoded accurately.
+/// (See #3547 for one time when it was not.)
+#[test]
+fn test_runtime_version_encoding() {
+    let runtime_version = RuntimeVersion {
+        spec_name: String::new().into(),
+        impl_name: String::new().into(),
+        authoring_version: 0,
+        spec_version: 0,
+        impl_version: 0,
+        apis: (&[]).into(),
+        transaction_version: 0,
+        system_version: 1,
+    };
+
+    let runtime_version_encoded = runtime_version.encode();
+    let mut runtime_version_encoded_slice = runtime_version_encoded.as_slice();
+    // TODO: use decode_all here once the bug is fixed
+    let runtime_version_roundtrip_result =
+        RuntimeVersion::decode(&mut runtime_version_encoded_slice);
+    let runtime_version_roundtrip_encoded = runtime_version_roundtrip_result
+        .as_ref()
+        .map(Encode::encode);
+
+    // Checking everything at once allows us to look at the version, encoded bytes, and leftover bytes at the same time
+    match (
+        &runtime_version_roundtrip_result,
+        runtime_version_roundtrip_encoded,
+    ) {
+        (Ok(runtime_version_roundtrip), Ok(runtime_version_roundtrip_encoded)) => assert_eq!(
+            (
+                &runtime_version,
+                hex::encode(&runtime_version_encoded),
+                hex::encode([]),
+            ),
+            (
+                runtime_version_roundtrip,
+                hex::encode(&runtime_version_roundtrip_encoded),
+                // There should be no left over bytes after decoding
+                hex::encode(&runtime_version_encoded_slice),
+            )
+        ),
+        // This always fails, we use it to show the left over bytes
+        (Err(runtime_version_roundtrip_error), _) => assert_eq!(
+            (Ok(runtime_version), hex::encode([])),
+            (
+                Err(runtime_version_roundtrip_error),
+                hex::encode(&runtime_version_encoded_slice)
+            ),
+        ),
+        (Ok(_), Err(_)) => unreachable!("only decoding can introduce errors"),
+    }
+}
+
+/// This test makes sure the ApisVec type (from RuntimeVersion) is encoded and decoded accurately.
+/// (See #3547 for one time when it was not.)
+#[test]
+fn test_apis_vec_encoding() {
+    let apis_vec = ApisVec::from(&[]);
+
+    let apis_vec_encoded = apis_vec.encode();
+    let mut apis_vec_encoded_slice = apis_vec_encoded.as_slice();
+    // TODO: use decode_all here once the bug is fixed
+    let apis_vec_roundtrip_result = ApisVec::decode(&mut apis_vec_encoded_slice);
+    let apis_vec_roundtrip_encoded = apis_vec_roundtrip_result.as_ref().map(Encode::encode);
+
+    // Checking everything at once allows us to look at the version, encoded bytes, and leftover bytes at the same time
+    match (&apis_vec_roundtrip_result, apis_vec_roundtrip_encoded) {
+        (Ok(apis_vec_roundtrip), Ok(apis_vec_roundtrip_encoded)) => assert_eq!(
+            (&apis_vec, hex::encode(&apis_vec_encoded), hex::encode([]),),
+            (
+                apis_vec_roundtrip,
+                hex::encode(&apis_vec_roundtrip_encoded),
+                // There should be no left over bytes after decoding
+                hex::encode(&apis_vec_encoded_slice),
+            )
+        ),
+        // This always fails, we use it to show the left over bytes
+        (Err(apis_vec_roundtrip_error), _) => assert_eq!(
+            (Ok(apis_vec), hex::encode([])),
+            (
+                Err(apis_vec_roundtrip_error),
+                hex::encode(&apis_vec_encoded_slice)
+            ),
+        ),
+        (Ok(_), Err(_)) => unreachable!("only decoding can introduce errors"),
+    }
 }

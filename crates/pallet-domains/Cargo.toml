@@ -39,6 +39,7 @@ subspace-runtime-primitives.workspace = true
 
 [dev-dependencies]
 domain-pallet-executive.workspace = true
+hex.workspace = true
 hex-literal.workspace = true
 pallet-subspace.workspace = true
 pallet-timestamp.workspace = true
@@ -53,6 +54,7 @@ std = [
     "frame-benchmarking?/std",
     "frame-support/std",
     "frame-system/std",
+    "hex/std",
     "log/std",
     "pallet-balances/std",
     "pallet-subspace/std",

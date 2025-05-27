@@ -7956,6 +7956,7 @@ dependencies = [
  "frame-benchmarking",
  "frame-support",
  "frame-system",
+ "hex",
  "hex-literal",
  "hexlit",
  "log",
