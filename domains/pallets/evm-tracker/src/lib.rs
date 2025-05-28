@@ -20,6 +20,11 @@
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
+#[cfg(all(feature = "runtime-benchmarks", test))]
+mod mock;
+
 pub mod check_nonce;
 pub mod create_contract;
 pub mod fees;

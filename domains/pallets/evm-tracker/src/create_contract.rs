@@ -139,7 +139,7 @@ where
     <RuntimeCallFor<Runtime> as Dispatchable>::RuntimeOrigin:
         AsSystemOriginSigner<AccountIdFor<Runtime>> + Clone,
 {
-    fn do_validate_unsigned(call: &RuntimeCallFor<Runtime>) -> TransactionValidity {
+    pub(crate) fn do_validate_unsigned(call: &RuntimeCallFor<Runtime>) -> TransactionValidity {
         if !is_create_unsigned_contract_allowed::<Runtime>(call) {
             Err(InvalidTransaction::Custom(ERR_CONTRACT_CREATION_NOT_ALLOWED).into())
         } else {
@@ -147,7 +147,7 @@ where
         }
     }
 
-    fn do_validate(
+    pub(crate) fn do_validate(
         origin: &OriginFor<Runtime>,
         call: &RuntimeCallFor<Runtime>,
     ) -> TransactionValidity {
