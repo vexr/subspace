@@ -28,6 +28,9 @@
 #![allow(unused_imports)]
 #![allow(missing_docs)]
 
+// Manually added import
+use crate as pallet_evm_tracker;
+
 use frame_support::{traits::Get, weights::Weight};
 use core::marker::PhantomData;
 
