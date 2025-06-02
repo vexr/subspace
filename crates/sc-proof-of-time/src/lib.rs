@@ -1,6 +1,5 @@
 //! Subspace proof of time implementation.
 
-
 mod slots;
 pub mod source;
 pub mod verifier;

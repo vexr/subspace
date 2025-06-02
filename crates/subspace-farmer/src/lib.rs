@@ -10,7 +10,6 @@
     impl_trait_in_assoc_type,
     int_roundings,
     iter_collect_into,
-    
     never_type,
     result_flattening,
     trait_alias,
