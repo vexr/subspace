@@ -1,8 +1,13 @@
 //! Benchmarking for `BalanceTransferCheck` extensions.
 
+// Unfortunately, black_box is not available in scale_info or sp_runtime yet
+#[cfg(not(feature = "std"))]
+extern crate core;
+
 use crate::extension::{
     BalanceTransferCheckExtension, BalanceTransferChecks, MaybeBalancesCall, MaybeNestedCall,
 };
+use core::hint::black_box;
 use core::marker::PhantomData;
 use frame_benchmarking::v2::*;
 use frame_support::dispatch::{DispatchInfo, PostDispatchInfo};
@@ -49,7 +54,7 @@ mod benchmarks {
 
         #[block]
         {
-            BalanceTransferCheckExtension::<T>::do_validate_signed(&call).unwrap();
+            BalanceTransferCheckExtension::<T>::do_validate_signed(black_box(&call)).unwrap();
         }
     }
 
@@ -61,7 +66,7 @@ mod benchmarks {
         }
         #[block]
         {
-            BalanceTransferCheckExtension::<T>::do_validate_signed(&call).unwrap();
+            BalanceTransferCheckExtension::<T>::do_validate_signed(black_box(&call)).unwrap();
         }
     }
 
@@ -73,7 +78,7 @@ mod benchmarks {
         }
         #[block]
         {
-            BalanceTransferCheckExtension::<T>::do_validate_signed(&call).unwrap();
+            BalanceTransferCheckExtension::<T>::do_validate_signed(black_box(&call)).unwrap();
         }
     }
 }
