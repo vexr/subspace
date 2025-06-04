@@ -40,22 +40,24 @@ impl<T: frame_system::Config> crate::extension::WeightInfo for WeightInfo<T> {
 		//  Measured:  `0`
 		//  Estimated: `1486`
 		// Minimum execution time: 1_000_000 picoseconds.
-		Weight::from_parts(1_067_813, 0)
+		Weight::from_parts(1_049_377, 0)
 			.saturating_add(Weight::from_parts(0, 1486))
-			// Standard Error: 38
-			.saturating_add(Weight::from_parts(4, 0).saturating_mul(c.into()))
+			// Standard Error: 37
+			.saturating_add(Weight::from_parts(29, 0).saturating_mul(c.into()))
 			.saturating_add(T::DbWeight::get().reads(1))
 	}
 	/// Storage: `RuntimeConfigs::EnableBalanceTransfers` (r:1 w:0)
 	/// Proof: `RuntimeConfigs::EnableBalanceTransfers` (`max_values`: Some(1), `max_size`: Some(1), added: 496, mode: `MaxEncodedLen`)
 	/// The range of component `c` is `[0, 1000]`.
-	fn balance_transfer_check_utility(_c: u32, ) -> Weight {
+	fn balance_transfer_check_utility(c: u32, ) -> Weight {
 		// Proof Size summary in bytes:
 		//  Measured:  `0`
 		//  Estimated: `1486`
 		// Minimum execution time: 1_000_000 picoseconds.
-		Weight::from_parts(1_052_471, 0)
+		Weight::from_parts(1_014_703, 0)
 			.saturating_add(Weight::from_parts(0, 1486))
+			// Standard Error: 39
+			.saturating_add(Weight::from_parts(122, 0).saturating_mul(c.into()))
 			.saturating_add(T::DbWeight::get().reads(1))
 	}
 	/// Storage: `RuntimeConfigs::EnableBalanceTransfers` (r:1 w:0)
@@ -66,10 +68,10 @@ impl<T: frame_system::Config> crate::extension::WeightInfo for WeightInfo<T> {
 		//  Measured:  `0`
 		//  Estimated: `1486`
 		// Minimum execution time: 1_000_000 picoseconds.
-		Weight::from_parts(1_024_508, 0)
+		Weight::from_parts(1_031_547, 0)
 			.saturating_add(Weight::from_parts(0, 1486))
-			// Standard Error: 37
-			.saturating_add(Weight::from_parts(79, 0).saturating_mul(c.into()))
+			// Standard Error: 35
+			.saturating_add(Weight::from_parts(40, 0).saturating_mul(c.into()))
 			.saturating_add(T::DbWeight::get().reads(1))
 	}
 }
